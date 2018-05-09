@@ -7,13 +7,13 @@ import (
 	"net/http"
 	"strings"
 	"regexp"
-	"github.com/ximply/ping_exporter/cache"
 	"github.com/ximply/tcpping_exporter/ping"
 	"fmt"
 	"github.com/robfig/cron"
 	"io"
 	"time"
 	"strconv"
+	"sync"
 )
 
 var (
@@ -25,7 +25,8 @@ var (
 )
 
 var destList []ping.Target
-
+var g_lock sync.RWMutex
+var g_result string
 var doing bool
 
 func isIP4(ip string) bool {
@@ -44,6 +45,8 @@ func doWork() {
 	}
 	doing = true
 
+	ret := ""
+	namespace := "tcp_ping"
 	for _, t := range destList {
 		pinger := ping.NewTCPing()
 		pinger.SetTarget(&t)
@@ -52,26 +55,21 @@ func doWork() {
 		case <-pingerDone:
 			break
 		}
-		cache.GetInstance().Add(fmt.Sprintf("%s:%d", t.Host, t.Port),
-			3 * time.Minute, float64(pinger.Result().MaxDuration) / float64(1000000))
+		ret += fmt.Sprintf("%s_delay{addr=\"%s\",port=\"%d\"} %g\n",
+			namespace, t.Host, t.Port, float64(pinger.Result().MaxDuration) / float64(1000000))
 	}
+
+	g_lock.Lock()
+	g_result = ret
+	g_lock.Unlock()
 
 	doing = false
 }
 
 func metrics(w http.ResponseWriter, r *http.Request) {
-	ret := ""
-	namespace := "tcp_ping"
-
-	for _, t := range destList {
-		ok, v := cache.GetInstance().Value(fmt.Sprintf("%s:%d", t.Host, t.Port))
-		if ok && v != nil {
-			ret += fmt.Sprintf("%s_delay{addr=\"%s\",port=\"%d\"} %g\n",
-				namespace, t.Host, t.Port, v.(float64))
-		}
-	}
-
-	io.WriteString(w, ret)
+	g_lock.RLock()
+	io.WriteString(w, g_result)
+	g_lock.RUnlock()
 }
 
 func main() {
@@ -109,7 +107,6 @@ func main() {
 	}
 
 	doing = false
-	doWork()
 	c := cron.New()
 	c.AddFunc("0 */1 * * * ?", doWork)
 	c.Start()
